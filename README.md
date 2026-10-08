@@ -17,7 +17,7 @@ Designed for Kotlin and JVM backend applications (Ktor, Spring Boot, Micronaut, 
   - Saves `.env` local backup file.
 - **Day-1 Fast Deployment (`deployCloudRun`)**:
   - Automatically depends on `buildFatJar`, `shadowJar`, or `bootJar`.
-  - Submits to Cloud Build and deploys container to Cloud Run.
+  - Submits the project's own directory (or `sourceDir`) to Cloud Build, which builds the `Dockerfile` at its root, and deploys the container to Cloud Run.
   - Automatically applies performance and stability flags (`--no-cpu-throttling`, `--no-invoker-iam-check`, `--allow-unauthenticated`).
 - **Domain Mapping (`mapCustomDomain`)**:
   - Maps custom domains to Cloud Run services in supported regions (`asia-southeast1`, etc.).
@@ -39,7 +39,7 @@ pluginManagement {
 ### In `build.gradle.kts`:
 ```kotlin
 plugins {
-    id("com.awakekt.cloudrun") version "1.0.0"
+    id("com.awakekt.cloudrun") version "1.0.2"
 }
 
 cloudRun {
@@ -57,11 +57,21 @@ cloudRun {
     noCpuThrottling.set(true)
     allowUnauthenticated.set(true)
     noInvokerIamCheck.set(true)
-    
+
+    // Folder uploaded to Cloud Build; it must hold the Dockerfile. Defaults to this project's directory.
+    sourceDir.set(layout.projectDirectory)
+    // Identity the service runs as; without it Cloud Run uses the Compute Engine default account.
+    runtimeServiceAccount.set("my-api@my-gcp-project.iam.gserviceaccount.com")
+
     env("APP_ENV", "production")
     env("SERVER_TIMEZONE", "Asia/Manila")
+    // Secret Manager reference (SECRET_NAME:VERSION), never the value itself.
+    secret("API_KEY", "my-api-key:latest")
 }
 ```
+
+Environment variables reach `gcloud run deploy` through a temporary `--env-vars-file`, so values may hold
+commas and never appear on the command line. Like `--set-env-vars`, it replaces every variable the service had.
 
 ---
 

@@ -1,5 +1,6 @@
 package com.awakekt.cloudrun
 
+import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.model.ObjectFactory
 import org.gradle.api.provider.MapProperty
@@ -24,6 +25,12 @@ abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
     val secrets: MapProperty<String, String> = objects.mapProperty(String::class.java, String::class.java)
     val jarFile: RegularFileProperty = objects.fileProperty()
     val dryRun: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
+
+    // Folder uploaded to Cloud Build; it must hold the Dockerfile. Defaults to the project's own directory.
+    val sourceDir: DirectoryProperty = objects.directoryProperty()
+
+    // Identity the service runs as (--service-account); Cloud Run's default is the Compute Engine account.
+    val runtimeServiceAccount: Property<String> = objects.property(String::class.java)
 
     // Workload Identity Federation settings
     val githubRepo: Property<String> = objects.property(String::class.java)

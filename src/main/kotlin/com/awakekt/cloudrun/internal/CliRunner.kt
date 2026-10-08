@@ -4,6 +4,7 @@ import org.gradle.api.GradleException
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import kotlin.concurrent.thread
 
 object CliRunner {
 
@@ -24,21 +25,26 @@ object CliRunner {
         if (workingDir != null) pb.directory(workingDir)
 
         val process = pb.start()
+        // Nothing answers a prompt; end of input makes the command take its default instead of waiting.
+        process.outputStream.close()
         val stdout = StringBuilder()
         val stderr = StringBuilder()
 
         val outReader = BufferedReader(InputStreamReader(process.inputStream))
         val errReader = BufferedReader(InputStreamReader(process.errorStream))
 
-        var line: String?
-        while (outReader.readLine().also { line = it } != null) {
-            if (printOutput) println(line)
-            stdout.appendLine(line)
+        // Both streams drain at once: a command that fills one pipe while the other is read blocks forever.
+        val errDrain = thread(name = "cloudrun-cli-stderr", isDaemon = true) {
+            errReader.forEachLine {
+                if (printOutput) System.err.println(it)
+                stderr.appendLine(it)
+            }
         }
-        while (errReader.readLine().also { line = it } != null) {
-            if (printOutput) System.err.println(line)
-            stderr.appendLine(line)
+        outReader.forEachLine {
+            if (printOutput) println(it)
+            stdout.appendLine(it)
         }
+        errDrain.join()
 
         val exitCode = process.waitFor()
         if (exitCode != 0 && !ignoreExitCode) {
