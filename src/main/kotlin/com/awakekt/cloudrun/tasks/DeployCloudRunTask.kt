@@ -23,15 +23,24 @@ abstract class DeployCloudRunTask : DefaultTask() {
     @set:Option(option = "tag", description = "Container image tag (defaults to git SHA or 'latest')")
     var tagOption: String? = null
 
+    @get:Input
+    @set:Option(option = "dryRun", description = "Simulate deployment without modifying GCP resources")
+    var dryRunOption: Boolean = false
+
+    @get:Input
+    @set:Option(option = "preview", description = "Preview deployment commands without modifying GCP resources")
+    var previewOption: Boolean = false
+
     @TaskAction
     fun execute() {
         val ext = extension.get()
+        val isDryRun = dryRunOption || previewOption || ext.dryRun.get()
 
         val projectId = ext.projectId.orNull?.ifBlank { null }
             ?: System.getenv("GCP_PROJECT_ID")?.ifBlank { null }
             ?: CliRunner.run("gcloud", "config", "get-value", "project", ignoreExitCode = true, printOutput = false).stdout
                 .lines().firstOrNull()?.trim()?.ifBlank { null }
-            ?: throw GradleException("GCP Project ID is required. Specify via cloudRun.projectId or GCP_PROJECT_ID environment variable.")
+            ?: if (isDryRun) "dryrun-project-id" else throw GradleException("GCP Project ID is required. Specify via cloudRun.projectId or GCP_PROJECT_ID environment variable.")
 
         val region = ext.region.get()
         val serviceName = ext.serviceName.orNull ?: project.name
@@ -44,25 +53,32 @@ abstract class DeployCloudRunTask : DefaultTask() {
 
         val imageUri = "$region-docker.pkg.dev/$projectId/$artifactRepo/$serviceName:$tag"
 
+        val headerSuffix = if (isDryRun) " [DRY RUN]" else ""
         println("==========================================================")
-        println("🚀 Deploying to Google Cloud Run (com.awakekt.cloudrun)")
+        println("🚀 Deploying to Google Cloud Run (com.awakekt.cloudrun)$headerSuffix")
         println("   Project ID  : $projectId")
         println("   Region      : $region")
         println("   Service Name: $serviceName")
         println("   Image URI   : $imageUri")
         println("==========================================================")
 
-        // 1. Submit to Cloud Build
-        println("☁️  1. Submitting to Cloud Build and pushing container...")
-        CliRunner.run(
+        val buildArgs = listOf(
             "gcloud", "builds", "submit",
             "--project=$projectId",
             "--tag=$imageUri",
             project.rootDir.absolutePath
         )
 
+        // 1. Submit to Cloud Build
+        if (isDryRun) {
+            println("[DRY RUN] ☁️  1. Would submit to Cloud Build:")
+            println("   ${buildArgs.joinToString(" ")}")
+        } else {
+            println("☁️  1. Submitting to Cloud Build and pushing container...")
+            CliRunner.run(*buildArgs.toTypedArray())
+        }
+
         // 2. Deploy to Cloud Run
-        println("🚢 2. Deploying service to Cloud Run...")
         val deployArgs = mutableListOf(
             "gcloud", "run", "deploy", serviceName,
             "--image=$imageUri",
@@ -110,6 +126,19 @@ abstract class DeployCloudRunTask : DefaultTask() {
 
         deployArgs.add("--format=value(status.url)")
 
+        if (isDryRun) {
+            println()
+            println("[DRY RUN] 🚢 2. Would deploy service to Cloud Run:")
+            println("   ${deployArgs.joinToString(" ")}")
+            println()
+            println("==========================================================")
+            println("🔎 Dry Run Complete! No changes were made to GCP.")
+            println("   Planned Service URL: https://$serviceName-<hash>-$region.a.run.app")
+            println("==========================================================")
+            return
+        }
+
+        println("🚢 2. Deploying service to Cloud Run...")
         val deployResult = CliRunner.run(*deployArgs.toTypedArray())
         val serviceUrl = deployResult.stdout.lines().lastOrNull { it.startsWith("https://") } ?: deployResult.stdout.trim()
 

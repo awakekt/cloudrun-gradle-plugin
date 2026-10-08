@@ -75,6 +75,38 @@ cloudRun {
 
 ---
 
+## Dry-Run & Simulation Mode
+
+Preview all GCP commands, parameters, IAM role bindings, container image URIs, and environment variables without modifying any cloud infrastructure:
+
+### Via Command-Line Flag:
+```bash
+# Preview deployment
+./gradlew deployCloudRun --dryRun
+
+# Preview provisioning
+./gradlew provisionGcpWorkloadIdentity --dryRun
+
+# Preview custom domain mapping
+./gradlew mapCustomDomain --domain=api.example.com --dryRun
+```
+
+### Via Gradle Property:
+```bash
+./gradlew deployCloudRun -PdryRun
+```
+
+### Via Extension DSL:
+```kotlin
+cloudRun {
+    dryRun.set(true)
+}
+```
+
+> **Note:** Gradle's built-in `--dry-run` (`-m`) CLI flag skips all task executions globally. Use `--dryRun` or `-PdryRun` to invoke the plugin's simulation mode.
+
+---
+
 ## Publishing to Gradle Plugin Portal
 
 ```bash

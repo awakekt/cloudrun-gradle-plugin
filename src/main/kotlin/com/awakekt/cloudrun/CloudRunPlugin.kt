@@ -22,6 +22,13 @@ class CloudRunPlugin : Plugin<Project> {
         // Default service name from project name
         extension.serviceName.convention(project.name)
 
+        // Default dry-run from gradle properties (-PdryRun, -Ppreview) or env DRY_RUN
+        val isDryRun = project.hasProperty("dryRun") ||
+            (project.findProperty("dryRun") as? String)?.toBoolean() == true ||
+            project.hasProperty("preview") ||
+            System.getenv("DRY_RUN")?.toBoolean() == true
+        extension.dryRun.convention(isDryRun)
+
         // Register tasks
         project.tasks.register<ProvisionWorkloadIdentityTask>("provisionGcpWorkloadIdentity") {
             group = "cloud run"

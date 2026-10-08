@@ -23,6 +23,7 @@ abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
     val envVars: MapProperty<String, String> = objects.mapProperty(String::class.java, String::class.java)
     val secrets: MapProperty<String, String> = objects.mapProperty(String::class.java, String::class.java)
     val jarFile: RegularFileProperty = objects.fileProperty()
+    val dryRun: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
 
     // Workload Identity Federation settings
     val githubRepo: Property<String> = objects.property(String::class.java)
