@@ -22,6 +22,9 @@ class CloudRunPlugin : Plugin<Project> {
         // Default service name from project name
         extension.serviceName.convention(project.name)
 
+        // Upload the project's own directory, so a subproject's Dockerfile is the one Cloud Build finds
+        extension.sourceDir.convention(project.layout.projectDirectory)
+
         // Default dry-run from gradle properties (-PdryRun, -Ppreview) or env DRY_RUN
         val isDryRun = project.hasProperty("dryRun") ||
             (project.findProperty("dryRun") as? String)?.toBoolean() == true ||
