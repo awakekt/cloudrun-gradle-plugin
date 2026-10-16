@@ -4,6 +4,8 @@ import com.awakekt.cloudrun.CloudRunExtension
 import com.awakekt.cloudrun.internal.CliGcloud
 import com.awakekt.cloudrun.internal.CliRunner
 import com.awakekt.cloudrun.internal.Gcloud
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.provider.Property
@@ -13,6 +15,7 @@ import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
 import org.gradle.work.DisableCachingByDefault
+import java.io.File
 
 @DisableCachingByDefault(because = "Communicates with remote Google Cloud APIs")
 abstract class ProvisionCloudRunServiceTask : DefaultTask() {
@@ -45,7 +48,7 @@ abstract class ProvisionCloudRunServiceTask : DefaultTask() {
                 .lines().firstOrNull()?.trim()?.ifBlank { null }
             ?: if (isDryRun) "dryrun-project-id" else throw GradleException("GCP Project ID is required. Specify via --project, cloudRun.projectId, or GCP_PROJECT_ID environment variable.")
 
-        provisionCloudRunService(ext, projectId, isDryRun, CliGcloud, System::getenv)
+        provisionCloudRunService(ext, projectId, isDryRun, CliGcloud, System::getenv, File(temporaryDir, "cleanup-policies.json"))
     }
 }
 
@@ -66,7 +69,7 @@ private val DEPLOY_ROLES = listOf(
  * from the environment variable of the same name, the runtime account's access to them, and the deploy
  * account's roles. Re-running changes nothing: a secret is created once, and a new version is added only
  * when the variable's value differs from the latest. [env] supplies the values, which reach gcloud on stdin
- * and never appear in [log].
+ * and never appear in [log]. [policyFile] is where the Artifact Registry cleanup policy is written for gcloud.
  */
 internal fun provisionCloudRunService(
     ext: CloudRunExtension,
@@ -74,6 +77,7 @@ internal fun provisionCloudRunService(
     dryRun: Boolean,
     gcloud: Gcloud,
     env: (String) -> String?,
+    policyFile: File,
     log: (String) -> Unit = ::println,
 ) {
     val secrets = ext.secrets.get().map { (envKey, ref) -> envKey to ref.substringBefore(':') }
@@ -137,10 +141,83 @@ internal fun provisionCloudRunService(
     // Deploying a service that runs as another account means acting as it.
     change(listOf("gcloud", "iam", "service-accounts", "add-iam-policy-binding", runtime, "--member=$deployer", "--role=roles/iam.serviceAccountUser", "--project=$projectId", "--quiet"))
 
+    val keep = ext.keepImages.getOrElse(0)
+    require(keep >= 0) { "cloudRun.keepImages must be 0 or more, not $keep." }
+    if (keep > 0) {
+        step("Artifact Registry cleanup")
+        applyCleanupPolicy(ext.artifactRepo.get(), ext.region.get(), ext.serviceName.get(), keep, projectId, dryRun, gcloud, policyFile, log)
+    }
+
     // Cloud Run starts no revision whose secret has no version, so say so here rather than at deploy.
     if (missing.isNotEmpty()) {
         val list = missing.joinToString("\n") { (envKey, secret) -> "  $secret: export $envKey and run provisionCloudRunService again" }
         throw GradleException("No enabled version for ${missing.size} secret(s), and no environment variable to store one from:\n$list")
     }
     log(if (dryRun) "[DRY RUN] No changes were made to GCP." else "Provisioned $projectId.")
+}
+
+/**
+ * Keeps the newest [keep] images of [service] in [repo] and deletes older ones, through two cleanup policies named
+ * after the service. Policies other services put on the repository stay: gcloud may replace the whole set, so the
+ * existing ones are read first and written back with these two. Nothing is set when the repository already holds
+ * exactly this. packageNamePrefixes matches by prefix, so a service named "api" also covers "api-worker".
+ */
+private fun applyCleanupPolicy(
+    repo: String, region: String, service: String, keep: Int, projectId: String,
+    dryRun: Boolean, gcloud: Gcloud, policyFile: File, log: (String) -> Unit,
+) {
+    val prefix = if (dryRun) "[DRY RUN] " else ""
+    val ours = cleanupPolicies(service, keep)
+    val where = listOf(repo, "--project=$projectId", "--location=$region")
+    val set = listOf("gcloud", "artifacts", "repositories", "set-cleanup-policies") + where +
+        listOf("--policy=${policyFile.path}", "--no-dry-run", "--quiet")
+
+    if (dryRun) {
+        log("$prefix  ${set.joinToString(" ")}")
+        log("$prefix  # ${policyFile.name}, merged with the policies the repository already holds:")
+        JsonOutput.prettyPrint(JsonOutput.toJson(ours)).lines().forEach { log("$prefix  $it") }
+        return
+    }
+
+    val listed = gcloud.run(listOf("gcloud", "artifacts", "repositories", "list-cleanup-policies") + where, null, ignoreExitCode = false)
+    val existing = (JsonSlurper().parseText(listed.stdout.ifBlank { "[]" }) as List<*>).filterIsInstance<Map<*, *>>()
+    val ourNames = ours.map { it["name"] }.toSet()
+    val others = existing.filter { it["name"] !in ourNames }
+    val inert = "Dry run is enabled" in listed.stderr
+    val current = existing.filter { it["name"] in ourNames }
+    if (!inert && canonical(current) == canonical(ours)) {
+        log("  $repo already keeps the newest $keep images of $service")
+        return
+    }
+    policyFile.writeText(JsonOutput.toJson(others + ours))
+    try {
+        log("  ${set.joinToString(" ")}")
+        gcloud.run(set, null, ignoreExitCode = false)
+    } finally {
+        policyFile.delete()
+    }
+}
+
+// gcloud documents "Keep" and "any"; the canonical enum names are what its client recognizes and what it lists back.
+private fun cleanupPolicies(service: String, keep: Int): List<Map<String, Any>> = listOf(
+    linkedMapOf(
+        "name" to "keep-newest-$service",
+        "action" to mapOf("type" to "KEEP"),
+        "mostRecentVersions" to linkedMapOf("packageNamePrefixes" to listOf(service), "keepCount" to keep),
+    ),
+    linkedMapOf(
+        "name" to "delete-older-$service",
+        "action" to mapOf("type" to "DELETE"),
+        "condition" to linkedMapOf("tagState" to "ANY", "packageNamePrefixes" to listOf(service)),
+    ),
+)
+
+// Order and number types differ between what is written and what gcloud lists back; compare the meaning.
+private fun canonical(policies: List<*>): Any? = policies.map { norm(it) }.sortedBy { (it as Map<*, *>)["name"].toString() }
+
+private fun norm(value: Any?): Any? = when (value) {
+    is Map<*, *> -> value.entries.associate { it.key.toString() to norm(it.value) }.toSortedMap()
+    is List<*> -> value.map { norm(it) }
+    null -> null
+    else -> value.toString()
 }

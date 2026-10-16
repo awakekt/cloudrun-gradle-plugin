@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.awakekt"
-version = "1.1.0"
+version = "1.2.0"
 
 gradlePlugin {
     website.set("https://github.com/awakekt/cloudrun-gradle-plugin")

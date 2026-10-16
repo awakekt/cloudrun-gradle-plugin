@@ -19,11 +19,12 @@ Designed for Kotlin and JVM backend applications (Ktor, Spring Boot, Micronaut, 
 - **Day-1 Fast Deployment (`deployCloudRun`)**:
   - Automatically depends on `buildFatJar`, `shadowJar`, or `bootJar`.
   - Submits the project's own directory (or `sourceDir`) to Cloud Build, which builds the `Dockerfile` at its root, and deploys the container to Cloud Run.
-  - Automatically applies performance and stability flags (`--no-cpu-throttling`, `--no-invoker-iam-check`, `--allow-unauthenticated`).
+  - Automatically applies performance and stability flags (`--no-cpu-throttling`, `--no-invoker-iam-check`, `--allow-unauthenticated`), and `--cpu-boost` when `cpuBoost` is true.
 - **Service provisioning (`provisionCloudRunService`)**:
   - Enables the APIs the service needs, creates each `secret(...)` in Secret Manager and stores a version from the environment variable of the same name.
   - Grants the runtime account `secretAccessor` on each secret, `serviceAccountTokenCreator` on itself when `signsUrls = true`, and the deploy account the roles a deploy needs.
   - Idempotent, and fails when a secret ends up with no enabled version.
+  - Applies an Artifact Registry cleanup policy that keeps the newest `keepImages` images of the service (default 3) and deletes older ones, so deploys stay inside the free storage allowance.
 - **Domain Mapping (`mapCustomDomain`)**:
   - Maps custom domains to Cloud Run services in supported regions (`asia-southeast1`, etc.).
 
@@ -44,7 +45,7 @@ pluginManagement {
 ### In `build.gradle.kts`:
 ```kotlin
 plugins {
-    id("com.awakekt.cloudrun") version "1.1.0"
+    id("com.awakekt.cloudrun") version "1.2.0"
 }
 
 cloudRun {
@@ -64,6 +65,8 @@ cloudRun {
     // Set only to change Cloud Run's defaults (80 requests, 300 s); left unset, the flags stay off the deploy.
     concurrency.set(40)
     timeout.set(java.time.Duration.ofMinutes(10))
+    // Extra CPU while an instance starts (--cpu-boost). Left false, the flag stays off the deploy.
+    cpuBoost.set(true)
     noCpuThrottling.set(true)
     allowUnauthenticated.set(true)
     noInvokerIamCheck.set(true)
@@ -77,6 +80,9 @@ cloudRun {
     // and the deploy account roles beyond the ones every deploy needs.
     signsUrls.set(true)
     extraDeployRoles.add("roles/datastore.indexAdmin")
+    // provisionCloudRunService: keep this many of the service's newest images in artifactRepo, delete older ones.
+    // The default is 3; 0 applies no policy.
+    keepImages.set(3)
 
     env("APP_ENV", "production")
     env("SERVER_TIMEZONE", "Asia/Manila")
@@ -112,6 +118,34 @@ task, since Cloud Run starts no revision without one. The runtime account is `ru
 default account when unset; the deploy account is `serviceAccountName` in the project. It is granted `run.admin`,
 `cloudbuild.builds.editor`, `serviceusage.serviceUsageConsumer` and `storage.admin` on the project, `extraDeployRoles`, and
 `serviceAccountUser` on the runtime account.
+
+### Image cleanup
+
+Every deploy pushes one image (tagged with the git SHA) to `artifactRepo` and nothing removes the old ones, so storage
+grows past Artifact Registry's free allowance. With `keepImages = N` (default 3), `provisionCloudRunService` runs
+`gcloud artifacts repositories set-cleanup-policies` on `artifactRepo` with two policies named after the service:
+
+```json
+[
+  {"name": "keep-newest-<service>", "action": {"type": "KEEP"},
+   "mostRecentVersions": {"packageNamePrefixes": ["<service>"], "keepCount": N}},
+  {"name": "delete-older-<service>", "action": {"type": "DELETE"},
+   "condition": {"tagState": "ANY", "packageNamePrefixes": ["<service>"]}}
+]
+```
+
+A keep policy wins over a delete policy, so the newest N versions stay and the rest go. Artifact Registry applies cleanup
+policies in a periodic background job, so old images disappear within about a day. Notes:
+
+- Re-running changes nothing: the repository's policies are read first, and nothing is set when these two already match.
+  Policies other services put on the same repository are written back untouched.
+- `packageNamePrefixes` is a prefix match, so a service named `api` also covers a package `api-worker` in the same repository.
+- `keepImages = 0` (or no value) applies no policy. It does not remove one applied earlier; use
+  `gcloud artifacts repositories delete-cleanup-policies`.
+- The policy is applied active (`--no-dry-run`). `--dryRun` on the task is the plugin's simulation and prints the policy.
+- Keep at least 2 so a rollback target survives: a revision whose image was deleted cannot start new instances.
+- Setting the policy needs `artifactregistry.repositories.update` (`roles/artifactregistry.repoAdmin`) on the repository,
+  which the account running `provisionCloudRunService` has; the deploy account does not need it.
 
 ## Dry-Run & Simulation Mode
 

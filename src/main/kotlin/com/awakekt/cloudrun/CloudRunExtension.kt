@@ -30,6 +30,13 @@ abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
     val concurrency: Property<Int> = objects.property(Int::class.java)
     val timeout: Property<Duration> = objects.property(Duration::class.java)
 
+    // true adds --cpu-boost (extra CPU while an instance starts); false leaves the flag off the deploy.
+    val cpuBoost: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
+
+    // provisionCloudRunService: how many of the service's newest images the artifactRepo repository keeps; older
+    // ones are deleted. 0, or no value, applies no policy.
+    val keepImages: Property<Int> = objects.property(Int::class.java).convention(3)
+
     // provisionCloudRunService: true when the service signs URLs as its own identity, which needs
     // roles/iam.serviceAccountTokenCreator on itself and the IAM Credentials API.
     val signsUrls: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
