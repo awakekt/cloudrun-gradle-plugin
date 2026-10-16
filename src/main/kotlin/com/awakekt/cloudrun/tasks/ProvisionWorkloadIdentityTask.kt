@@ -26,7 +26,7 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
 
     @get:Input
     @get:Optional
-    @set:Option(option = "repo", description = "GitHub repository (owner/repo)")
+    @set:Option(option = "repo", description = "GitHub repository (owner/repo), or a comma-separated list to trust multiple repositories with this identity")
     var repoOption: String? = null
 
     @get:Input
@@ -59,6 +59,8 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
             ?: resolveGitRemoteRepo()
             ?: if (isDryRun) "owner/repo" else throw GradleException("GitHub repository (owner/repo) is required. Specify via --repo, cloudRun.githubRepo, or ensure git remote origin is configured.")
 
+        val githubRepos = parseRepos(githubRepo)
+
         val region = regionOption?.ifBlank { null }
             ?: ext.region.get()
 
@@ -70,10 +72,11 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
         val providerResource = "projects/<project-number>/locations/global/workloadIdentityPools/$poolName/providers/$providerName"
 
         val headerSuffix = if (isDryRun) " [DRY RUN]" else ""
+        val repoLabel = if (githubRepos.size > 1) "GitHub Repos   " else "GitHub Repo    "
         println("==========================================================")
         println("🚀 Provisioning GCP Workload Identity Federation (com.awakekt.cloudrun)$headerSuffix")
         println("   Project ID     : $projectId")
-        println("   GitHub Repo    : $githubRepo")
+        println("   $repoLabel: ${githubRepos.joinToString(", ")}")
         println("   Region         : $region")
         println("   Service Account: $saName ($saEmail)")
         println("   Artifact Repo  : $artifactRepo")
@@ -95,14 +98,17 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
             println("      - roles/viewer")
             println("   6. Grant Compute Engine SA permissions for Cloud Build")
             println("   7. Ensure Workload Identity Pool exists: $poolName")
-            println("   8. Ensure Workload Identity Provider exists: $providerName (with condition: assertion.repository == '$githubRepo')")
-            println("   9. Bind Service Account to GitHub repository via roles/iam.workloadIdentityUser")
+            println("   8. Ensure Workload Identity Provider exists: $providerName (with condition: ${buildRepoCondition(githubRepos)})")
+            println("   9. Bind Service Account to ${if (githubRepos.size > 1) "each GitHub repository" else "GitHub repository"} via roles/iam.workloadIdentityUser:")
+            for (repo in githubRepos) {
+                println("      - $repo")
+            }
             println("  10. Generate local env file: ${ext.outputFile.get()} with content:")
             println("      GCP_PROJECT_ID=$projectId")
             println("      GCP_REGION=$region")
             println("      GCP_SERVICE_ACCOUNT=$saEmail")
             println("      GCP_WORKLOAD_IDENTITY_PROVIDER=$providerResource")
-            println("  11. Configure GitHub repository variables via 'gh' CLI (if authenticated):")
+            println("  11. Configure GitHub repository variables via 'gh' CLI (if authenticated), for ${if (githubRepos.size > 1) "each of" else ""} ${githubRepos.joinToString(", ")}:")
             println("      GCP_PROJECT_ID, GCP_REGION, GCP_SERVICE_ACCOUNT, GCP_WORKLOAD_IDENTITY_PROVIDER")
             println()
             println("==========================================================")
@@ -253,7 +259,7 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
             printOutput = false
         ).exitCode == 0
 
-        val condition = "assertion.repository == '$githubRepo'"
+        val condition = buildRepoCondition(githubRepos)
         if (!providerExists) {
             CliRunner.run(
                 "gcloud", "iam", "workload-identity-pools", "providers", "create-oidc", providerName,
@@ -281,18 +287,22 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
             println("   ℹ️ Workload Identity Provider updated with attribute condition.")
         }
 
-        // 8. Workload Identity User Binding
-        println("🔗 8. Binding GitHub repository to Service Account...")
-        val principal = "principalSet://iam.googleapis.com/projects/$projectNumber/locations/global/workloadIdentityPools/$poolName/attribute.repository/$githubRepo"
-        CliRunner.run(
-            "gcloud", "iam", "service-accounts", "add-iam-policy-binding", saEmail,
-            "--project=$projectId",
-            "--role=roles/iam.workloadIdentityUser",
-            "--member=$principal",
-            "--quiet",
-            printOutput = false
-        )
-        println("   ✅ IAM policy binding added.")
+        // 8. Workload Identity User Binding — one principalSet binding per trusted repo; the attribute
+        // condition narrows which repos' tokens are accepted at all, but each repo still needs its own
+        // principal bound to roles/iam.workloadIdentityUser to actually impersonate the service account.
+        println("🔗 8. Binding GitHub ${if (githubRepos.size > 1) "repositories" else "repository"} to Service Account...")
+        for (repo in githubRepos) {
+            val principal = "principalSet://iam.googleapis.com/projects/$projectNumber/locations/global/workloadIdentityPools/$poolName/attribute.repository/$repo"
+            CliRunner.run(
+                "gcloud", "iam", "service-accounts", "add-iam-policy-binding", saEmail,
+                "--project=$projectId",
+                "--role=roles/iam.workloadIdentityUser",
+                "--member=$principal",
+                "--quiet",
+                printOutput = false
+            )
+            println("   ✅ IAM policy binding added for $repo.")
+        }
 
         val resolvedProviderResource = "projects/$projectNumber/locations/global/workloadIdentityPools/$poolName/providers/$providerName"
 
@@ -309,16 +319,19 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
         )
         println("💾 Saved local backup configuration to: ${envFile.name}")
 
-        // 10. Automatically set GitHub variables if gh is logged in
+        // 10. Automatically set GitHub variables if gh is logged in — once per trusted repo, since
+        // Actions variables are set per-repository, not shared across repos.
         if (CliRunner.hasCommand("gh")) {
             val ghAuth = CliRunner.run("gh", "auth", "status", ignoreExitCode = true, printOutput = false).exitCode == 0
             if (ghAuth) {
                 println("🐙 9. Configuring GitHub Repository Variables via 'gh' CLI...")
-                CliRunner.run("gh", "variable", "set", "GCP_PROJECT_ID", "-b", projectId, "-R", githubRepo, ignoreExitCode = true, printOutput = false)
-                CliRunner.run("gh", "variable", "set", "GCP_REGION", "-b", region, "-R", githubRepo, ignoreExitCode = true, printOutput = false)
-                CliRunner.run("gh", "variable", "set", "GCP_SERVICE_ACCOUNT", "-b", saEmail, "-R", githubRepo, ignoreExitCode = true, printOutput = false)
-                CliRunner.run("gh", "variable", "set", "GCP_WORKLOAD_IDENTITY_PROVIDER", "-b", resolvedProviderResource, "-R", githubRepo, ignoreExitCode = true, printOutput = false)
-                println("   ✅ GitHub repository variables configured for $githubRepo.")
+                for (repo in githubRepos) {
+                    CliRunner.run("gh", "variable", "set", "GCP_PROJECT_ID", "-b", projectId, "-R", repo, ignoreExitCode = true, printOutput = false)
+                    CliRunner.run("gh", "variable", "set", "GCP_REGION", "-b", region, "-R", repo, ignoreExitCode = true, printOutput = false)
+                    CliRunner.run("gh", "variable", "set", "GCP_SERVICE_ACCOUNT", "-b", saEmail, "-R", repo, ignoreExitCode = true, printOutput = false)
+                    CliRunner.run("gh", "variable", "set", "GCP_WORKLOAD_IDENTITY_PROVIDER", "-b", resolvedProviderResource, "-R", repo, ignoreExitCode = true, printOutput = false)
+                    println("   ✅ GitHub repository variables configured for $repo.")
+                }
             }
         }
 
@@ -335,5 +348,19 @@ abstract class ProvisionWorkloadIdentityTask : DefaultTask() {
         val url = result.stdout.trim()
         val regex = Regex("""(?:github\.com[/:]|git@github\.com:)([^/]+/[^/.]+)(?:\.git)?""")
         return regex.find(url)?.groupValues?.get(1)
+    }
+
+    companion object {
+        /** Splits a `--repo` value into one or more `owner/repo` entries; accepts a comma-separated list. */
+        internal fun parseRepos(raw: String): List<String> =
+            raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
+        /** A single repo gets an equality check; multiple repos get a CEL `in` list so any of them is trusted. */
+        internal fun buildRepoCondition(repos: List<String>): String =
+            if (repos.size <= 1) {
+                "assertion.repository == '${repos.single()}'"
+            } else {
+                "assertion.repository in [${repos.joinToString(", ") { "'$it'" }}]"
+            }
     }
 }

@@ -2,6 +2,7 @@ package com.awakekt.cloudrun
 
 import com.awakekt.cloudrun.internal.CliRunner
 import com.awakekt.cloudrun.internal.ProcessResult
+import com.awakekt.cloudrun.tasks.ProvisionWorkloadIdentityTask
 import com.awakekt.cloudrun.tasks.cloudRunDeployArgs
 import com.awakekt.cloudrun.tasks.envVarsYaml
 import org.gradle.testfixtures.ProjectBuilder
@@ -84,6 +85,45 @@ class CloudRunPluginTest {
 
         val task = project.tasks.getByName("provisionGcpWorkloadIdentity") as com.awakekt.cloudrun.tasks.ProvisionWorkloadIdentityTask
         task.execute()
+    }
+
+    @Test
+    fun `provisionGcpWorkloadIdentity dry-run accepts a comma-separated repo list`() {
+        val project = ProjectBuilder.builder().build()
+        project.plugins.apply("com.awakekt.cloudrun")
+
+        val ext = project.extensions.getByType(CloudRunExtension::class.java)
+        ext.projectId.set("my-test-project")
+        ext.dryRun.set(true)
+
+        val task = project.tasks.getByName("provisionGcpWorkloadIdentity") as ProvisionWorkloadIdentityTask
+        task.repoOption = "owner1/repo1, owner2/repo2"
+        task.execute()
+    }
+
+    @Test
+    fun `parseRepos splits and trims a comma-separated list`() {
+        assertEquals(listOf("owner/repo"), ProvisionWorkloadIdentityTask.parseRepos("owner/repo"))
+        assertEquals(
+            listOf("owner1/repo1", "owner2/repo2"),
+            ProvisionWorkloadIdentityTask.parseRepos("owner1/repo1, owner2/repo2"),
+        )
+        assertEquals(
+            listOf("owner1/repo1", "owner2/repo2"),
+            ProvisionWorkloadIdentityTask.parseRepos("owner1/repo1,,owner2/repo2,"),
+        )
+    }
+
+    @Test
+    fun `buildRepoCondition uses equality for one repo and a CEL list for multiple`() {
+        assertEquals(
+            "assertion.repository == 'owner/repo'",
+            ProvisionWorkloadIdentityTask.buildRepoCondition(listOf("owner/repo")),
+        )
+        assertEquals(
+            "assertion.repository in ['owner1/repo1', 'owner2/repo2']",
+            ProvisionWorkloadIdentityTask.buildRepoCondition(listOf("owner1/repo1", "owner2/repo2")),
+        )
     }
 
     @Test
