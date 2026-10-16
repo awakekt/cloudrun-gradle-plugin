@@ -169,6 +169,9 @@ internal fun cloudRunDeployArgs(
         require(it.seconds >= 1) { "cloudRun.timeout must be at least one second, not $it." }
         deployArgs.add("--timeout=${it.seconds}s")
     }
+    if (ext.cpuBoost.getOrElse(false)) {
+        deployArgs.add("--cpu-boost")
+    }
     if (ext.noCpuThrottling.get()) {
         deployArgs.add("--no-cpu-throttling")
     }

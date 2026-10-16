@@ -5,8 +5,11 @@ import com.awakekt.cloudrun.internal.Gcloud
 import com.awakekt.cloudrun.internal.ProcessResult
 import com.awakekt.cloudrun.tasks.cloudRunDeployArgs
 import com.awakekt.cloudrun.tasks.provisionCloudRunService
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import org.gradle.api.GradleException
 import org.gradle.testfixtures.ProjectBuilder
+import java.io.File
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -20,6 +23,11 @@ private class FakeGcloud : Gcloud {
     val stdins = mutableListOf<String?>()
     val versions = mutableMapOf<String, MutableList<String>>()
 
+    /** The repository's cleanup policies, as `list-cleanup-policies` prints them. */
+    var policies: List<Any?> = emptyList()
+    var policyDryRun = false
+    val policyFiles = mutableListOf<String>()
+
     override fun run(args: List<String>, stdin: String?, ignoreExitCode: Boolean): ProcessResult {
         calls += args
         stdins += stdin
@@ -31,6 +39,16 @@ private class FakeGcloud : Gcloud {
             "secrets versions access" -> versions[args[5].removePrefix("--secret=")]?.lastOrNull()
                 ?.let { ProcessResult(0, it, "") } ?: ProcessResult(1, "", "no version")
             "secrets versions list" -> ProcessResult(0, if (versions[args[4]].orEmpty().isEmpty()) "" else "1", "")
+            "artifacts repositories list-cleanup-policies" ->
+                ProcessResult(0, JsonOutput.toJson(policies), if (policyDryRun) "Dry run is enabled." else "Dry run is disabled.")
+            "artifacts repositories set-cleanup-policies" -> {
+                // Replaces the whole set, which is the worst case for a repository other services share.
+                val text = File(args.single { it.startsWith("--policy=") }.removePrefix("--policy=")).readText()
+                policyFiles += text
+                policies = JsonSlurper().parseText(text) as List<*>
+                policyDryRun = "--dry-run" in args
+                ok()
+            }
             "projects describe $secret" -> ProcessResult(0, "123456", "")
             else -> ok()
         }
@@ -44,10 +62,13 @@ private class FakeGcloud : Gcloud {
 
 class ProvisionCloudRunServiceTest {
 
+    private val policyFile = File.createTempFile("cleanup-policies", ".json").also { it.deleteOnExit() }
+
     private fun ext(): CloudRunExtension {
         val project = ProjectBuilder.builder().build()
         project.plugins.apply("com.awakekt.cloudrun")
         return project.extensions.getByType(CloudRunExtension::class.java).apply {
+            serviceName.set("svc")
             runtimeServiceAccount.set("runtime@p.iam.gserviceaccount.com")
             secret("API_KEY", "api-key:latest")
             secret("SIGNING_KEY", "signing-key:latest")
@@ -65,7 +86,7 @@ class ProvisionCloudRunServiceTest {
         ext: CloudRunExtension = ext(),
     ): String {
         val log = StringBuilder()
-        provisionCloudRunService(ext, "p", dryRun, gcloud, env::get) { log.appendLine(it) }
+        provisionCloudRunService(ext, "p", dryRun, gcloud, env::get, policyFile) { log.appendLine(it) }
         return log.toString()
     }
 
@@ -93,6 +114,8 @@ class ProvisionCloudRunServiceTest {
             "gcloud projects add-iam-policy-binding p --member=serviceAccount:github-actions-deployer@p.iam.gserviceaccount.com --role=roles/storage.admin --condition=None --quiet",
             "gcloud projects add-iam-policy-binding p --member=serviceAccount:github-actions-deployer@p.iam.gserviceaccount.com --role=roles/datastore.indexAdmin --condition=None --quiet",
             "gcloud iam service-accounts add-iam-policy-binding runtime@p.iam.gserviceaccount.com --member=serviceAccount:github-actions-deployer@p.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --project=p --quiet",
+            "gcloud artifacts repositories list-cleanup-policies cloudrun --project=p --location=asia-southeast1",
+            "gcloud artifacts repositories set-cleanup-policies cloudrun --project=p --location=asia-southeast1 --policy=${policyFile.path} --no-dry-run --quiet",
         )
         assertEquals(expected, gcloud.calls.map { it.joinToString(" ") })
         // The values travel on stdin, in the order they were stored, never as arguments.
@@ -238,5 +261,129 @@ class ProvisionCloudRunServiceTest {
     fun `concurrency and timeout reject values Cloud Run would refuse`() {
         assertFailsWith<IllegalArgumentException> { deployArgs { concurrency.set(0) } }
         assertFailsWith<IllegalArgumentException> { deployArgs { timeout.set(Duration.ZERO) } }
+    }
+
+    private val twoPolicies = "[" +
+        """{"name":"keep-newest-svc","action":{"type":"KEEP"},"mostRecentVersions":{"packageNamePrefixes":["svc"],"keepCount":3}},""" +
+        """{"name":"delete-older-svc","action":{"type":"DELETE"},"condition":{"tagState":"ANY","packageNamePrefixes":["svc"]}}""" +
+        "]"
+
+    private fun artifactCalls(gcloud: FakeGcloud) = gcloud.calls.filter { it.getOrNull(1) == "artifacts" }.map { it.joinToString(" ") }
+
+    @Test
+    fun `cleanup keeps the newest 3 images of the service by default - the policy file is pinned`() {
+        val gcloud = FakeGcloud()
+        run(gcloud)
+
+        assertEquals(1, gcloud.policyFiles.size)
+        assertEquals(twoPolicies, gcloud.policyFiles.single())
+        assertFalse(policyFile.exists(), "the policy file is removed after the call")
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun `positive control - keepImages sets exactly N in the keep policy and the delete policy covers the same package`() {
+        for (n in listOf(1, 5, 12)) {
+            val gcloud = FakeGcloud()
+            run(gcloud, ext = ext().apply { keepImages.set(n) })
+
+            val policies = JsonSlurper().parseText(gcloud.policyFiles.single()) as List<Map<*, *>>
+            val keeps = policies.filter { (it["action"] as Map<*, *>)["type"] == "KEEP" }
+            val deletes = policies.filter { (it["action"] as Map<*, *>)["type"] == "DELETE" }
+            assertEquals(1, keeps.size)
+            assertEquals(1, deletes.size)
+            val recent = keeps.single()["mostRecentVersions"] as Map<*, *>
+            assertEquals(n, recent["keepCount"])
+            assertEquals(listOf("svc"), recent["packageNamePrefixes"])
+            assertEquals(mapOf("tagState" to "ANY", "packageNamePrefixes" to listOf("svc")), deletes.single()["condition"])
+        }
+    }
+
+    @Test
+    fun `keepImages 0 or no value sets no policy and does not even read the repository`() {
+        val zero = FakeGcloud()
+        run(zero, ext = ext().apply { keepImages.set(0) })
+        assertEquals(emptyList(), artifactCalls(zero))
+
+        val unset = FakeGcloud()
+        run(unset, ext = ext().apply { keepImages.unsetConvention() })
+        assertEquals(emptyList(), artifactCalls(unset))
+        assertTrue(unset.policyFiles.isEmpty())
+
+        // Control: the same extension with the default does set one.
+        assertEquals(2, artifactCalls(FakeGcloud().also { run(it) }).size)
+    }
+
+    @Test
+    fun `a negative keepImages is refused`() {
+        assertFailsWith<IllegalArgumentException> { run(FakeGcloud(), ext = ext().apply { keepImages.set(-1) }) }
+    }
+
+    @Test
+    fun `a second cleanup changes nothing, a new count changes only the count`() {
+        val gcloud = FakeGcloud()
+        run(gcloud)
+        gcloud.calls.clear()
+
+        run(gcloud)
+        assertEquals(1, artifactCalls(gcloud).size, "only the read: ${artifactCalls(gcloud)}")
+        assertEquals(1, gcloud.policyFiles.size)
+
+        run(gcloud, ext = ext().apply { keepImages.set(4) })
+        assertEquals(2, gcloud.policyFiles.size)
+        assertEquals(twoPolicies.replace("\"keepCount\":3", "\"keepCount\":4"), gcloud.policyFiles.last())
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun `cleanup keeps the policies other services put on the repository`() {
+        val gcloud = FakeGcloud()
+        val other = mapOf("name" to "keep-newest-worker", "action" to mapOf("type" to "KEEP"), "mostRecentVersions" to mapOf("keepCount" to 7, "packageNamePrefixes" to listOf("worker")))
+        gcloud.policies = listOf(other)
+
+        run(gcloud)
+
+        val written = JsonSlurper().parseText(gcloud.policyFiles.single()) as List<Map<*, *>>
+        assertEquals(listOf("keep-newest-worker", "keep-newest-svc", "delete-older-svc"), written.map { it["name"] })
+        assertEquals(other, written.first())
+    }
+
+    @Test
+    fun `a repository in dry-run mode is switched back to deleting even when the policies match`() {
+        val gcloud = FakeGcloud()
+        run(gcloud)
+        gcloud.policyDryRun = true
+
+        run(gcloud)
+
+        assertEquals(2, gcloud.policyFiles.size)
+        assertFalse(gcloud.policyDryRun)
+    }
+
+    @Test
+    fun `dry run prints the cleanup command and policy without reaching gcloud`() {
+        val gcloud = FakeGcloud()
+        val out = run(gcloud, dryRun = true)
+
+        assertTrue(gcloud.calls.isEmpty())
+        assertTrue("[DRY RUN]   gcloud artifacts repositories set-cleanup-policies cloudrun --project=p --location=asia-southeast1 --policy=${policyFile.path} --no-dry-run --quiet" in out)
+        assertEquals(twoPolicies, out.lines().filter { it.startsWith("[DRY RUN]   ") }.map { it.removePrefix("[DRY RUN]   ") }
+            .dropWhile { it != "[" }.takeWhile { it != "" }.joinToString("").let { JsonOutput.toJson(JsonSlurper().parseText(it)) })
+        assertTrue(out.lines().filter { it.isNotBlank() }.all { it.startsWith("[DRY RUN] ") })
+    }
+
+    @Test
+    fun `cpuBoost adds --cpu-boost only when true`() {
+        val unset = deployArgs()
+        assertFalse("--cpu-boost" in unset)
+        assertFalse(unset.any { it.contains("cpu-boost") })
+
+        assertFalse(deployArgs { cpuBoost.set(false) }.any { it.contains("cpu-boost") })
+
+        val on = deployArgs { cpuBoost.set(true) }
+        assertEquals(
+            listOf("--cpu=1", "--cpu-boost", "--no-cpu-throttling"),
+            on.subList(on.indexOf("--cpu=1"), on.indexOf("--cpu=1") + 3),
+        )
     }
 }
