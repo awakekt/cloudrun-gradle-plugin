@@ -2,6 +2,7 @@ package com.awakekt.cloudrun
 
 import com.awakekt.cloudrun.tasks.DeployCloudRunTask
 import com.awakekt.cloudrun.tasks.MapCustomDomainTask
+import com.awakekt.cloudrun.tasks.ProvisionCloudRunServiceTask
 import com.awakekt.cloudrun.tasks.ProvisionWorkloadIdentityTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
@@ -36,6 +37,12 @@ class CloudRunPlugin : Plugin<Project> {
         project.tasks.register<ProvisionWorkloadIdentityTask>("provisionGcpWorkloadIdentity") {
             group = "cloud run"
             description = "Provisions GCP Workload Identity Federation, Service Account, and Artifact Registry."
+            this.extension.set(extension)
+        }
+
+        project.tasks.register<ProvisionCloudRunServiceTask>("provisionCloudRunService") {
+            group = "cloud run"
+            description = "Enables the service's APIs, stores its secrets and grants the runtime and deploy accounts their roles."
             this.extension.set(extension)
         }
 

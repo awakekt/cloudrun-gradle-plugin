@@ -11,6 +11,7 @@ object CliRunner {
     fun run(
         vararg args: String,
         workingDir: File? = null,
+        stdin: String? = null,
         ignoreExitCode: Boolean = false,
         printOutput: Boolean = true
     ): ProcessResult {
@@ -26,7 +27,8 @@ object CliRunner {
 
         val process = pb.start()
         // Nothing answers a prompt; end of input makes the command take its default instead of waiting.
-        process.outputStream.close()
+        // stdin carries a value that must stay off the command line, such as a secret.
+        process.outputStream.use { if (stdin != null) it.write(stdin.toByteArray()) }
         val stdout = StringBuilder()
         val stderr = StringBuilder()
 
