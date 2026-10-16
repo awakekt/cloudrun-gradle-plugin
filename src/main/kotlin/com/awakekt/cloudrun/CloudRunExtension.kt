@@ -32,7 +32,9 @@ abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
     // Identity the service runs as (--service-account); Cloud Run's default is the Compute Engine account.
     val runtimeServiceAccount: Property<String> = objects.property(String::class.java)
 
-    // Workload Identity Federation settings
+    // Workload Identity Federation settings. githubRepo accepts a single "owner/repo", or a comma-separated
+    // list ("owner1/repo1,owner2/repo2") to trust more than one repository with the same identity — e.g. a
+    // canonical repo and a CI mirror of it.
     val githubRepo: Property<String> = objects.property(String::class.java)
     val serviceAccountName: Property<String> = objects.property(String::class.java).convention("github-actions-deployer")
     val workloadIdentityPool: Property<String> = objects.property(String::class.java).convention("github-pool")
