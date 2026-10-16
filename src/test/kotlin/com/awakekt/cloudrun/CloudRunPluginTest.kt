@@ -47,6 +47,7 @@ class CloudRunPluginTest {
         assertNotNull(project.tasks.findByName("provisionGcpWorkloadIdentity"))
         assertNotNull(project.tasks.findByName("deployCloudRun"))
         assertNotNull(project.tasks.findByName("mapCustomDomain"))
+        assertNotNull(project.tasks.findByName("provisionCloudRunService"))
     }
 
     @Test

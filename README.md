@@ -20,6 +20,10 @@ Designed for Kotlin and JVM backend applications (Ktor, Spring Boot, Micronaut, 
   - Automatically depends on `buildFatJar`, `shadowJar`, or `bootJar`.
   - Submits the project's own directory (or `sourceDir`) to Cloud Build, which builds the `Dockerfile` at its root, and deploys the container to Cloud Run.
   - Automatically applies performance and stability flags (`--no-cpu-throttling`, `--no-invoker-iam-check`, `--allow-unauthenticated`).
+- **Service provisioning (`provisionCloudRunService`)**:
+  - Enables the APIs the service needs, creates each `secret(...)` in Secret Manager and stores a version from the environment variable of the same name.
+  - Grants the runtime account `secretAccessor` on each secret, `serviceAccountTokenCreator` on itself when `signsUrls = true`, and the deploy account the roles a deploy needs.
+  - Idempotent, and fails when a secret ends up with no enabled version.
 - **Domain Mapping (`mapCustomDomain`)**:
   - Maps custom domains to Cloud Run services in supported regions (`asia-southeast1`, etc.).
 
@@ -40,7 +44,7 @@ pluginManagement {
 ### In `build.gradle.kts`:
 ```kotlin
 plugins {
-    id("com.awakekt.cloudrun") version "1.0.3"
+    id("com.awakekt.cloudrun") version "1.1.0"
 }
 
 cloudRun {
@@ -57,6 +61,9 @@ cloudRun {
     maxInstances.set(3)
     memory.set("1Gi")
     cpu.set("1")
+    // Set only to change Cloud Run's defaults (80 requests, 300 s); left unset, the flags stay off the deploy.
+    concurrency.set(40)
+    timeout.set(java.time.Duration.ofMinutes(10))
     noCpuThrottling.set(true)
     allowUnauthenticated.set(true)
     noInvokerIamCheck.set(true)
@@ -65,6 +72,11 @@ cloudRun {
     sourceDir.set(layout.projectDirectory)
     // Identity the service runs as; without it Cloud Run uses the Compute Engine default account.
     runtimeServiceAccount.set("my-api@my-gcp-project.iam.gserviceaccount.com")
+
+    // provisionCloudRunService: grant the runtime account serviceAccountTokenCreator on itself (to sign URLs),
+    // and the deploy account roles beyond the ones every deploy needs.
+    signsUrls.set(true)
+    extraDeployRoles.add("roles/datastore.indexAdmin")
 
     env("APP_ENV", "production")
     env("SERVER_TIMEZONE", "Asia/Manila")
@@ -83,10 +95,23 @@ commas and never appear on the command line. Like `--set-env-vars`, it replaces 
 | Task | Description | Command |
 |---|---|---|
 | `provisionGcpWorkloadIdentity` | One-click setup of WIF, IAM, and Artifact Registry. | `./gradlew provisionGcpWorkloadIdentity --repo="owner/repo"` (or `--repo="owner/repo,other-owner/mirror-repo"` for multiple) |
+| `provisionCloudRunService` | Enables APIs, stores `secret(...)` values from the environment, and grants the runtime and deploy accounts their roles. | `API_KEY=... ./gradlew provisionCloudRunService` |
 | `deployCloudRun` | Compiles fat JAR, builds container, and deploys to Cloud Run. | `./gradlew deployCloudRun` |
 | `mapCustomDomain` | Maps custom domain to Cloud Run service. | `./gradlew mapCustomDomain --domain=api.example.com` |
 
 ---
+
+## Provisioning a service
+
+Run `provisionGcpWorkloadIdentity` once for the deploy account, then `provisionCloudRunService` before the first deploy.
+For each `secret("API_KEY", "api-key:latest")` it creates the secret `api-key` and stores the value of the environment
+variable `API_KEY` as a new version, but only when the value differs from the latest, so running it again changes nothing.
+Values reach `gcloud` on stdin: never on a command line, in a log or in `--dryRun` output, which prints `********` instead.
+A variable that is not set leaves the secret's versions as they are; a secret that then has no enabled version fails the
+task, since Cloud Run starts no revision without one. The runtime account is `runtimeServiceAccount`, or the Compute Engine
+default account when unset; the deploy account is `serviceAccountName` in the project. It is granted `run.admin`,
+`cloudbuild.builds.editor`, `serviceusage.serviceUsageConsumer` and `storage.admin` on the project, `extraDeployRoles`, and
+`serviceAccountUser` on the runtime account.
 
 ## Dry-Run & Simulation Mode
 
@@ -99,6 +124,9 @@ Preview all GCP commands, parameters, IAM role bindings, container image URIs, a
 
 # Preview provisioning
 ./gradlew provisionGcpWorkloadIdentity --dryRun
+
+# Preview secrets and IAM (values masked)
+./gradlew provisionCloudRunService --dryRun
 
 # Preview custom domain mapping
 ./gradlew mapCustomDomain --domain=api.example.com --dryRun

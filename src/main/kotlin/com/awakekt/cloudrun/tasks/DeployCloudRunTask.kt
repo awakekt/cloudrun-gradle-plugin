@@ -161,6 +161,14 @@ internal fun cloudRunDeployArgs(
     if (ext.cpu.isPresent) {
         deployArgs.add("--cpu=${ext.cpu.get()}")
     }
+    ext.concurrency.orNull?.let {
+        require(it >= 1) { "cloudRun.concurrency must be at least 1, not $it." }
+        deployArgs.add("--concurrency=$it")
+    }
+    ext.timeout.orNull?.let {
+        require(it.seconds >= 1) { "cloudRun.timeout must be at least one second, not $it." }
+        deployArgs.add("--timeout=${it.seconds}s")
+    }
     if (ext.noCpuThrottling.get()) {
         deployArgs.add("--no-cpu-throttling")
     }

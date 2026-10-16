@@ -3,8 +3,10 @@ package com.awakekt.cloudrun
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.model.ObjectFactory
+import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
+import java.time.Duration
 import javax.inject.Inject
 
 abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
@@ -23,6 +25,18 @@ abstract class CloudRunExtension @Inject constructor(objects: ObjectFactory) {
     val noInvokerIamCheck: Property<Boolean> = objects.property(Boolean::class.java).convention(true)
     val envVars: MapProperty<String, String> = objects.mapProperty(String::class.java, String::class.java)
     val secrets: MapProperty<String, String> = objects.mapProperty(String::class.java, String::class.java)
+
+    // Left unset, the flags stay off the deploy and Cloud Run keeps its defaults (80 requests, 300 s).
+    val concurrency: Property<Int> = objects.property(Int::class.java)
+    val timeout: Property<Duration> = objects.property(Duration::class.java)
+
+    // provisionCloudRunService: true when the service signs URLs as its own identity, which needs
+    // roles/iam.serviceAccountTokenCreator on itself and the IAM Credentials API.
+    val signsUrls: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
+
+    // Roles the deploy account holds on the project beyond what every deploy needs.
+    val extraDeployRoles: ListProperty<String> = objects.listProperty(String::class.java)
+
     val jarFile: RegularFileProperty = objects.fileProperty()
     val dryRun: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
 
