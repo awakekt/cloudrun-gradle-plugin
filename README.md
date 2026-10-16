@@ -13,7 +13,8 @@ Designed for Kotlin and JVM backend applications (Ktor, Spring Boot, Micronaut, 
   - Automatically creates Service Account with least-privilege IAM roles (`run.admin`, `artifactregistry.writer`, `viewer`, etc.).
   - Grants required Cloud Build permissions to Default Compute Engine Service Account.
   - Creates regional Artifact Registry repository.
-  - Configures GitHub Repository Variables automatically via `gh` CLI.
+  - Trusts a single repo, or a comma-separated list of repos (e.g. a canonical repo plus a CI mirror), with the same identity.
+  - Configures GitHub Repository Variables automatically via `gh` CLI, for every trusted repo.
   - Saves `.env` local backup file.
 - **Day-1 Fast Deployment (`deployCloudRun`)**:
   - Automatically depends on `buildFatJar`, `shadowJar`, or `bootJar`.
@@ -39,7 +40,7 @@ pluginManagement {
 ### In `build.gradle.kts`:
 ```kotlin
 plugins {
-    id("com.awakekt.cloudrun") version "1.0.2"
+    id("com.awakekt.cloudrun") version "1.0.3"
 }
 
 cloudRun {
@@ -48,6 +49,8 @@ cloudRun {
     serviceName.set("my-api")
     artifactRepo.set("my-api-repo")
     githubRepo.set("owner/repo")
+    // Or trust more than one repo with the same identity, e.g. a canonical repo plus a CI mirror:
+    // githubRepo.set("owner/repo,other-owner/mirror-repo")
     
     port.set(8080)
     minInstances.set(1)
@@ -79,7 +82,7 @@ commas and never appear on the command line. Like `--set-env-vars`, it replaces 
 
 | Task | Description | Command |
 |---|---|---|
-| `provisionGcpWorkloadIdentity` | One-click setup of WIF, IAM, and Artifact Registry. | `./gradlew provisionGcpWorkloadIdentity` |
+| `provisionGcpWorkloadIdentity` | One-click setup of WIF, IAM, and Artifact Registry. | `./gradlew provisionGcpWorkloadIdentity --repo="owner/repo"` (or `--repo="owner/repo,other-owner/mirror-repo"` for multiple) |
 | `deployCloudRun` | Compiles fat JAR, builds container, and deploys to Cloud Run. | `./gradlew deployCloudRun` |
 | `mapCustomDomain` | Maps custom domain to Cloud Run service. | `./gradlew mapCustomDomain --domain=api.example.com` |
 
