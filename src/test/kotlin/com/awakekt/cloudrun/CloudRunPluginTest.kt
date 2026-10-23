@@ -26,11 +26,11 @@ class CloudRunPluginTest {
         assertEquals("asia-southeast1", ext.region.get())
         assertEquals("cloudrun", ext.artifactRepo.get())
         assertEquals(8080, ext.port.get())
-        assertEquals(1, ext.minInstances.get())
+        assertEquals(0, ext.minInstances.get())
         assertEquals(3, ext.maxInstances.get())
         assertEquals("1Gi", ext.memory.get())
         assertEquals("1", ext.cpu.get())
-        assertTrue(ext.noCpuThrottling.get())
+        assertFalse(ext.noCpuThrottling.get())
         assertTrue(ext.allowUnauthenticated.get())
         assertTrue(ext.noInvokerIamCheck.get())
         assertFalse(ext.dryRun.get())
@@ -58,6 +58,31 @@ class CloudRunPluginTest {
         val ext = project.extensions.getByType(CloudRunExtension::class.java)
         ext.dryRun.set(true)
         assertTrue(ext.dryRun.get())
+    }
+
+    @Test
+    fun `deployCloudRun applies the image cleanup policy, and none when keepImages is 0`() {
+        fun dryRunOutput(keep: Int): String {
+            val project = ProjectBuilder.builder().build()
+            project.plugins.apply("com.awakekt.cloudrun")
+            val ext = project.extensions.getByType(CloudRunExtension::class.java)
+            ext.projectId.set("my-test-project")
+            ext.serviceName.set("my-test-service")
+            ext.keepImages.set(keep)
+            ext.dryRun.set(true)
+            val task = project.tasks.getByName("deployCloudRun") as com.awakekt.cloudrun.tasks.DeployCloudRunTask
+            val out = java.io.ByteArrayOutputStream()
+            val previous = System.out
+            System.setOut(java.io.PrintStream(out, true, "UTF-8"))
+            try { task.execute() } finally { System.setOut(previous) }
+            return out.toString("UTF-8")
+        }
+
+        val kept = dryRunOutput(3)
+        assertTrue("gcloud artifacts repositories set-cleanup-policies" in kept, kept)
+        assertTrue("\"keepCount\": 3" in kept, kept)
+        assertTrue("keep-newest-my-test-service" in kept, kept)
+        assertFalse("set-cleanup-policies" in dryRunOutput(0), "keepImages = 0 applies no policy")
     }
 
     @Test

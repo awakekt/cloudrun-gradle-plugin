@@ -1,6 +1,7 @@
 package com.awakekt.cloudrun.tasks
 
 import com.awakekt.cloudrun.CloudRunExtension
+import com.awakekt.cloudrun.internal.CliGcloud
 import com.awakekt.cloudrun.internal.CliRunner
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
@@ -102,6 +103,8 @@ abstract class DeployCloudRunTask : DefaultTask() {
                 envMap.forEach { (key, value) -> println("      $key=$value") }
             }
             println()
+            applyImageCleanup(ext, serviceName, projectId, dryRun = true, CliGcloud, File(temporaryDir, "cleanup-policies.json"))
+            println()
             println("==========================================================")
             println("🔎 Dry Run Complete! No changes were made to GCP.")
             println("   Planned Service URL: https://$serviceName-<hash>-$region.a.run.app")
@@ -117,6 +120,10 @@ abstract class DeployCloudRunTask : DefaultTask() {
             envFile?.delete()
         }
         val serviceUrl = deployResult.stdout.lines().lastOrNull { it.startsWith("https://") } ?: deployResult.stdout.trim()
+
+        // 3. After the deploy, so the image now serving is the newest and always among those kept.
+        if (ext.keepImages.getOrElse(0) > 0) println("🧹 3. Keeping the newest ${ext.keepImages.get()} images of $serviceName...")
+        applyImageCleanup(ext, serviceName, projectId, dryRun = false, CliGcloud, File(temporaryDir, "cleanup-policies.json"))
 
         println("==========================================================")
         println("🎉 Cloud Run Deployment Complete!")
@@ -172,9 +179,9 @@ internal fun cloudRunDeployArgs(
     if (ext.cpuBoost.getOrElse(false)) {
         deployArgs.add("--cpu-boost")
     }
-    if (ext.noCpuThrottling.get()) {
-        deployArgs.add("--no-cpu-throttling")
-    }
+    // Always explicit: gcloud keeps a service's current setting when the flag is left out, so a service once deployed
+    // with always-on CPU would stay billed for every second it runs.
+    deployArgs.add(if (ext.noCpuThrottling.get()) "--no-cpu-throttling" else "--cpu-throttling")
     if (ext.allowUnauthenticated.get()) {
         deployArgs.add("--allow-unauthenticated")
     }

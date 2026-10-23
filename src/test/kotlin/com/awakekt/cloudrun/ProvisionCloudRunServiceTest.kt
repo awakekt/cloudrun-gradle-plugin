@@ -252,7 +252,7 @@ class ProvisionCloudRunServiceTest {
         assertTrue("--concurrency=40" in set)
         assertTrue("--timeout=600s" in set)
         assertEquals(
-            listOf("--cpu=1", "--concurrency=40", "--timeout=600s", "--no-cpu-throttling"),
+            listOf("--cpu=1", "--concurrency=40", "--timeout=600s", "--cpu-throttling"),
             set.subList(set.indexOf("--cpu=1"), set.indexOf("--cpu=1") + 4),
         )
     }
@@ -382,8 +382,21 @@ class ProvisionCloudRunServiceTest {
 
         val on = deployArgs { cpuBoost.set(true) }
         assertEquals(
-            listOf("--cpu=1", "--cpu-boost", "--no-cpu-throttling"),
+            listOf("--cpu=1", "--cpu-boost", "--cpu-throttling"),
             on.subList(on.indexOf("--cpu=1"), on.indexOf("--cpu=1") + 3),
         )
+    }
+
+    @Test
+    fun `by default a deploy scales to zero and bills CPU only during requests`() {
+        val defaults = deployArgs()
+        assertTrue("--min-instances=0" in defaults, defaults.toString())
+        assertTrue("--cpu-throttling" in defaults, defaults.toString())
+        assertFalse("--no-cpu-throttling" in defaults, defaults.toString())
+
+        // Opting into always-on CPU and a warm instance is explicit, and still passed through.
+        val warm = deployArgs { noCpuThrottling.set(true); minInstances.set(1) }
+        assertTrue("--no-cpu-throttling" in warm && "--min-instances=1" in warm, warm.toString())
+        assertFalse("--cpu-throttling" in warm, warm.toString())
     }
 }
