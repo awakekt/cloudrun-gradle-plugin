@@ -19,7 +19,9 @@ Designed for Kotlin and JVM backend applications (Ktor, Spring Boot, Micronaut, 
 - **Day-1 Fast Deployment (`deployCloudRun`)**:
   - Automatically depends on `buildFatJar`, `shadowJar`, or `bootJar`.
   - Submits the project's own directory (or `sourceDir`) to Cloud Build, which builds the `Dockerfile` at its root, and deploys the container to Cloud Run.
-  - Automatically applies performance and stability flags (`--no-cpu-throttling`, `--no-invoker-iam-check`, `--allow-unauthenticated`), and `--cpu-boost` when `cpuBoost` is true.
+  - Deploys inside Cloud Run's free tier by default: no idle instance (`--min-instances=0`) and CPU billed only during requests (`--cpu-throttling`). Opt into a warm instance or always-on CPU with `minInstances` and `noCpuThrottling`, which bill every second an instance runs.
+  - Applies `--no-invoker-iam-check` and `--allow-unauthenticated`, and `--cpu-boost` when `cpuBoost` is true.
+  - After each deploy, applies the image cleanup policy (`keepImages`, default 3), so images stay inside the free storage allowance even for a service provisioned before the policy existed.
 - **Service provisioning (`provisionCloudRunService`)**:
   - Enables the APIs the service needs, creates each `secret(...)` in Secret Manager and stores a version from the environment variable of the same name.
   - Grants the runtime account `secretAccessor` on each secret, `serviceAccountTokenCreator` on itself when `signsUrls = true`, and the deploy account the roles a deploy needs.
@@ -58,7 +60,7 @@ cloudRun {
     // githubRepo.set("owner/repo,other-owner/mirror-repo")
     
     port.set(8080)
-    minInstances.set(1)
+    minInstances.set(0)          // Default. 1 or more keeps an instance warm, billed 24/7.
     maxInstances.set(3)
     memory.set("1Gi")
     cpu.set("1")
@@ -67,7 +69,7 @@ cloudRun {
     timeout.set(java.time.Duration.ofMinutes(10))
     // Extra CPU while an instance starts (--cpu-boost). Left false, the flag stays off the deploy.
     cpuBoost.set(true)
-    noCpuThrottling.set(true)
+    noCpuThrottling.set(false)   // Default: CPU billed only during requests. true bills every second.
     allowUnauthenticated.set(true)
     noInvokerIamCheck.set(true)
 
@@ -122,7 +124,7 @@ default account when unset; the deploy account is `serviceAccountName` in the pr
 ### Image cleanup
 
 Every deploy pushes one image (tagged with the git SHA) to `artifactRepo` and nothing removes the old ones, so storage
-grows past Artifact Registry's free allowance. With `keepImages = N` (default 3), `provisionCloudRunService` runs
+grows past Artifact Registry's free allowance. With `keepImages = N` (default 3), `provisionCloudRunService` and every `deployCloudRun` (after the deploy succeeds, so the image now serving is the newest) run
 `gcloud artifacts repositories set-cleanup-policies` on `artifactRepo` with two policies named after the service:
 
 ```json
@@ -181,6 +183,28 @@ cloudRun {
 > **Note:** Gradle's built-in `--dry-run` (`-m`) CLI flag skips all task executions globally. Use `--dryRun` or `-PdryRun` to invoke the plugin's simulation mode.
 
 ---
+
+## Upgrading to 2.0
+
+2.0 changes two defaults so a service with no settings costs nothing while idle:
+
+| Setting | 1.x default | 2.0 default |
+|---|---|---|
+| `minInstances` | 1 (one instance always running) | 0 (scales to zero) |
+| `noCpuThrottling` | true (CPU billed every second) | false (CPU billed only during requests) |
+
+A deploy now always passes `--cpu-throttling` or `--no-cpu-throttling`, because gcloud otherwise keeps a service's
+current setting. Upgrading therefore moves an existing always-on service to request-based billing on its next deploy.
+To keep the 1.x behaviour, for background work between requests or to avoid cold starts, set both explicitly:
+
+```kotlin
+cloudRun {
+    minInstances.set(1)
+    noCpuThrottling.set(true)
+}
+```
+
+`deployCloudRun` also applies the image cleanup policy after each deploy. Set `keepImages.set(0)` to turn that off.
 
 ## Publishing to Gradle Plugin Portal
 

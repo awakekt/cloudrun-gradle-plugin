@@ -141,12 +141,7 @@ internal fun provisionCloudRunService(
     // Deploying a service that runs as another account means acting as it.
     change(listOf("gcloud", "iam", "service-accounts", "add-iam-policy-binding", runtime, "--member=$deployer", "--role=roles/iam.serviceAccountUser", "--project=$projectId", "--quiet"))
 
-    val keep = ext.keepImages.getOrElse(0)
-    require(keep >= 0) { "cloudRun.keepImages must be 0 or more, not $keep." }
-    if (keep > 0) {
-        step("Artifact Registry cleanup")
-        applyCleanupPolicy(ext.artifactRepo.get(), ext.region.get(), ext.serviceName.get(), keep, projectId, dryRun, gcloud, policyFile, log)
-    }
+    applyImageCleanup(ext, ext.serviceName.get(), projectId, dryRun, gcloud, policyFile, log)
 
     // Cloud Run starts no revision whose secret has no version, so say so here rather than at deploy.
     if (missing.isNotEmpty()) {
@@ -154,6 +149,28 @@ internal fun provisionCloudRunService(
         throw GradleException("No enabled version for ${missing.size} secret(s), and no environment variable to store one from:\n$list")
     }
     log(if (dryRun) "[DRY RUN] No changes were made to GCP." else "Provisioned $projectId.")
+}
+
+/**
+ * Applies [CloudRunExtension.keepImages]'s cleanup policy to the service's Artifact Registry repository, when it is
+ * above 0. Both `provisionCloudRunService` and every `deployCloudRun` call this, so a service provisioned before the
+ * policy existed, or a repository whose policy was removed, gets it back on its next deploy. It reads the repository's
+ * policies first and changes nothing when they already match, so a deploy that finds them in place costs one read.
+ */
+internal fun applyImageCleanup(
+    ext: CloudRunExtension,
+    service: String,
+    projectId: String,
+    dryRun: Boolean,
+    gcloud: Gcloud,
+    policyFile: File,
+    log: (String) -> Unit = ::println,
+) {
+    val keep = ext.keepImages.getOrElse(0)
+    require(keep >= 0) { "cloudRun.keepImages must be 0 or more, not $keep." }
+    if (keep == 0) return
+    log("${if (dryRun) "[DRY RUN] " else ""}== Artifact Registry cleanup")
+    applyCleanupPolicy(ext.artifactRepo.get(), ext.region.get(), service, keep, projectId, dryRun, gcloud, policyFile, log)
 }
 
 /**
